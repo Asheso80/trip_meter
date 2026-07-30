@@ -114,6 +114,7 @@
   button:disabled { opacity: 0.35; }
   #startBtn { background: var(--good); }
   #startBtn.running { background: var(--warn); }
+  #startBtn.ready { background: var(--accent); }
   #resetBtn { background: var(--panel); color: var(--muted); flex: 0 0 30%; }
 
   .calbar {
@@ -142,6 +143,39 @@
   }
   #calToggle.on { border-color: var(--accent); color: var(--accent); }
 
+  #helpToggle {
+    background: none;
+    border: 1px solid var(--muted);
+    color: var(--muted);
+    font-size: 14px;
+    font-weight: 700;
+    width: 30px;
+    height: 30px;
+    border-radius: 50%;
+    flex: 0 0 auto;
+    line-height: 1;
+    padding: 0;
+  }
+
+  #helpOverlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(6, 9, 13, 0.97);
+    z-index: 100;
+    display: none;
+    flex-direction: column;
+    padding: calc(env(safe-area-inset-top) + 24px) 22px calc(env(safe-area-inset-bottom) + 24px);
+    overflow-y: auto;
+  }
+  #helpOverlay.on { display: flex; }
+  #helpOverlay h2 { font-size: 18px; color: var(--accent); margin-bottom: 4px; }
+  #helpOverlay h3 { font-size: 14px; color: var(--text); margin: 18px 0 6px; text-transform: uppercase; letter-spacing: 0.5px; }
+  #helpOverlay p, #helpOverlay li { font-size: 14px; line-height: 1.55; color: var(--text); }
+  #helpOverlay ol { padding-left: 20px; margin-top: 4px; }
+  #helpOverlay li { margin-bottom: 6px; }
+  #helpOverlay .tapclose { text-align: center; color: var(--muted); font-size: 12px; margin-top: 24px; }
+  #helpOverlay .muted { color: var(--muted); }
+
   .banner {
     background: #1a1200;
     border: 1px solid var(--warn);
@@ -157,6 +191,7 @@
 <body>
   <header>
     <h1>Trip Meter</h1>
+    <button id="helpToggle" title="Help">?</button>
     <button id="calToggle">CAL</button>
     <div id="gpsdot" title="GPS status"></div>
   </header>
@@ -181,13 +216,40 @@
     <div class="row"><span>Error</span><span id="calError">—</span></div>
   </div>
 
-  <div class="accuracy" id="accuracy">Press Start to begin tracking</div>
+  <div class="accuracy" id="accuracy">Press Acquire to warm up GPS</div>
 
   <div id="banner" class="banner" style="display:none"></div>
 
   <div class="controls">
-    <button id="startBtn">START TRIP</button>
+    <button id="startBtn">ACQUIRE GPS</button>
     <button id="resetBtn">RESET</button>
+  </div>
+
+  <div id="helpOverlay">
+    <h2>How to use Trip Meter</h2>
+    <p class="muted">A GPS cross-check for your meter and odometer. Not a legal-for-trade device.</p>
+
+    <h3>Running a trip</h3>
+    <ol>
+      <li><b>ACQUIRE GPS</b> — warms up the signal. Wait while it counts fixes. The button unlocks once the signal is steady (5+ fixes, accuracy within 10 m).</li>
+      <li><b>ZERO &amp; START</b> — clears any warm-up drift and starts the trip from a clean zero. Fare shows the $5.20 drop fee at once.</li>
+      <li>Drive. Distance and fare climb live. <b>PAUSE</b> stops counting; RESUME re-acquires before continuing.</li>
+      <li><b>RESET</b> clears everything back to the start.</li>
+    </ol>
+
+    <h3>Why acquire first</h3>
+    <p>Cold GPS scatters for the first several seconds and reads phantom distance while sitting still. Warming up then zeroing wipes that out, so your trip starts at a true zero.</p>
+
+    <h3>Calibration (CAL)</h3>
+    <p>Checks how accurate the GPS is against a distance you already know. Tap <b>CAL</b>, drive your measured 1.6 km stretch, and read the Error line. Green means within 3%. Run it a few times and average. You can leave CAL on during a real fare, but the error reading only means anything up to the 1.6 km mark.</p>
+
+    <h3>Fixes</h3>
+    <p>The number of good GPS readings accepted so far. A health indicator — if it climbs steadily, the signal is solid. It has no effect on the fare.</p>
+
+    <h3>Fare</h3>
+    <p>$5.20 to start, then $1.50 per kilometre. Exactly 1.6 km = $7.60.</p>
+
+    <p class="tapclose">Tap anywhere to close</p>
   </div>
 
 <script>
@@ -199,10 +261,16 @@ const MAX_SPEED_MPS  = 55;   // ~198 km/h; reject implausible jumps
 const DROP_FEE       = 5.20; // flat charge applied at Start
 const RATE_PER_KM    = 1.50; // $ per kilometre travelled
 const CAL_TARGET_KM  = 1.60; // known calibration distance
+// ---- Acquire-phase readiness gate -------------------------------------
+const READY_ACCURACY = 10;   // metres; signal must be at least this good to zero
+const READY_FIXES    = 5;    // require this many good fixes before zeroing
+// -----------------------------------------------------------------------
 // -----------------------------------------------------------------------
 
 let watchId = null;
-let running = false;
+let phase = 'idle';       // 'idle' | 'acquiring' | 'trip'
+let acqFixes = 0;         // good fixes counted during acquire phase
+let lastAccuracy = null;  // latest accuracy reading
 let totalMetres = 0;
 let fixCount = 0;
 let last = null;          // last accepted fix {lat, lon, t}
@@ -281,19 +349,31 @@ function fmtTime(s) {
 function onPosition(pos) {
   const { latitude, longitude, accuracy, speed } = pos.coords;
   const t = pos.timestamp;
+  lastAccuracy = accuracy;
   setGpsDot(accuracy);
-  $('accuracy').textContent = 'Accuracy ±' + Math.round(accuracy) + ' m';
 
   // Speed from device if available, else computed below
   if (speed != null && !isNaN(speed)) {
     $('speed').textContent = (speed * 3.6).toFixed(1) + ' km/h';
   }
 
-  if (accuracy > MAX_ACCURACY) return;   // gate 1: bad fix
+  if (accuracy > MAX_ACCURACY) {              // gate 1: bad fix
+    if (phase === 'acquiring') updateAcquireUI();
+    return;
+  }
 
   fixCount++;
   $('fixes').textContent = fixCount;
 
+  // --- ACQUIRE PHASE: warm up, do not accumulate distance ---
+  if (phase === 'acquiring') {
+    acqFixes++;
+    last = { lat: latitude, lon: longitude, t };  // keep a fresh anchor
+    updateAcquireUI();
+    return;
+  }
+
+  // --- TRIP PHASE: accumulate distance ---
   if (last) {
     const d = haversine(last.lat, last.lon, latitude, longitude);
     const dt = (t - last.t) / 1000;
@@ -308,6 +388,27 @@ function onPosition(pos) {
     }
   }
   last = { lat: latitude, lon: longitude, t };
+  $('accuracy').textContent = 'Accuracy ±' + Math.round(accuracy) + ' m';
+}
+
+function isReady() {
+  return acqFixes >= READY_FIXES && lastAccuracy != null && lastAccuracy <= READY_ACCURACY;
+}
+
+function updateAcquireUI() {
+  const acc = lastAccuracy != null ? Math.round(lastAccuracy) : '—';
+  if (isReady()) {
+    $('accuracy').textContent = 'Ready to zero · ±' + acc + ' m';
+    $('accuracy').style.color = 'var(--good)';
+    $('startBtn').disabled = false;
+    $('startBtn').textContent = 'ZERO & START';
+    $('startBtn').classList.add('ready');
+  } else {
+    $('accuracy').textContent = 'Warming up GPS… ±' + acc + ' m · ' + acqFixes + '/' + READY_FIXES + ' fixes';
+    $('accuracy').style.color = '';
+    $('startBtn').disabled = true;
+    $('startBtn').textContent = 'ACQUIRING…';
+  }
 }
 
 function onError(err) {
@@ -330,22 +431,22 @@ function releaseWakeLock() {
 
 // Re-acquire wake lock if the page becomes visible again
 document.addEventListener('visibilitychange', () => {
-  if (running && document.visibilityState === 'visible') requestWakeLock();
+  if (phase === 'trip' && document.visibilityState === 'visible') requestWakeLock();
 });
 
-function start() {
+function acquire() {
   if (!('geolocation' in navigator)) {
     showBanner('Geolocation not supported on this device.');
     return;
   }
-  running = true;
+  phase = 'acquiring';
+  acqFixes = 0;
   last = null;
-  startTime = Date.now();
-  $('startBtn').textContent = 'PAUSE';
-  $('startBtn').classList.add('running');
-  $('accuracy').textContent = 'Acquiring GPS…';
-  renderFare();   // show drop fee at once
-
+  lastAccuracy = null;
+  $('startBtn').classList.remove('running', 'ready');
+  $('startBtn').disabled = true;
+  $('startBtn').textContent = 'ACQUIRING…';
+  $('accuracy').textContent = 'Warming up GPS…';
   requestWakeLock();
 
   watchId = navigator.geolocation.watchPosition(onPosition, onError, {
@@ -353,6 +454,22 @@ function start() {
     maximumAge: 0,
     timeout: 10000
   });
+}
+
+function zeroAndStart() {
+  // Clear any drift accumulated during warm-up, start the trip clean
+  phase = 'trip';
+  totalMetres = 0;
+  fixCount = 0;
+  last = null;            // next fix becomes the true origin
+  startTime = Date.now();
+  $('accuracy').style.color = '';
+  $('startBtn').textContent = 'PAUSE';
+  $('startBtn').classList.remove('ready');
+  $('startBtn').classList.add('running');
+  $('fixes').textContent = '0';
+  renderDistance();
+  renderFare();           // show drop fee at once
 
   timerInt = setInterval(() => {
     const s = Math.floor((Date.now() - startTime) / 1000);
@@ -361,26 +478,42 @@ function start() {
 }
 
 function pause() {
-  running = false;
+  phase = 'idle';
   $('startBtn').textContent = 'RESUME';
-  $('startBtn').classList.remove('running');
+  $('startBtn').classList.remove('running', 'ready');
   if (watchId != null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
   if (timerInt) { clearInterval(timerInt); timerInt = null; }
   last = null;   // avoid phantom jump across a pause gap
   releaseWakeLock();
   $('gpsdot').className = '';
+  $('accuracy').textContent = 'Paused · Resume re-acquires GPS';
+}
+
+function resume() {
+  // Resume behaves like a fresh acquire so we re-settle before counting again
+  acquire();
 }
 
 function reset() {
-  pause();
+  phase = 'idle';
+  if (watchId != null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
+  if (timerInt) { clearInterval(timerInt); timerInt = null; }
+  releaseWakeLock();
   totalMetres = 0;
   fixCount = 0;
+  acqFixes = 0;
+  last = null;
+  lastAccuracy = null;
   startTime = null;
-  $('startBtn').textContent = 'START TRIP';
+  $('startBtn').disabled = false;
+  $('startBtn').textContent = 'ACQUIRE GPS';
+  $('startBtn').classList.remove('running', 'ready');
   $('time').textContent = '0:00';
   $('fixes').textContent = '0';
   $('speed').textContent = '—';
-  $('accuracy').textContent = 'Press Start to begin tracking';
+  $('accuracy').style.color = '';
+  $('accuracy').textContent = 'Press Acquire to warm up GPS';
+  $('gpsdot').className = '';
   renderDistance();
 }
 
@@ -390,8 +523,21 @@ function showBanner(msg) {
   b.style.display = 'block';
 }
 
-$('startBtn').addEventListener('click', () => running ? pause() : start());
+$('startBtn').addEventListener('click', () => {
+  if (phase === 'idle') {
+    // Either a first acquire, or resume after pause
+    acquire();
+  } else if (phase === 'acquiring') {
+    if (isReady()) zeroAndStart();
+  } else if (phase === 'trip') {
+    pause();
+  }
+});
 $('resetBtn').addEventListener('click', reset);
+
+// Help overlay
+$('helpToggle').addEventListener('click', () => $('helpOverlay').classList.add('on'));
+$('helpOverlay').addEventListener('click', () => $('helpOverlay').classList.remove('on'));
 
 // Register service worker for offline use
 if ('serviceWorker' in navigator) {

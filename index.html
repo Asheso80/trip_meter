@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#0a0e14">
+<title>Trip Meter</title>
+<link rel="manifest" href="manifest.webmanifest">
+<style>
+  :root {
+    --bg: #0a0e14;
+    --panel: #141a24;
+    --accent: #3ea6ff;
+    --good: #35c759;
+    --warn: #ff9f0a;
+    --bad: #ff453a;
+    --text: #e8edf2;
+    --muted: #7a8694;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: system-ui, -apple-system, "Noto Sans", sans-serif;
+    overflow: hidden;
+    user-select: none;
+  }
+  body { display: flex; flex-direction: column; padding: env(safe-area-inset-top) 16px calc(env(safe-area-inset-bottom) + 16px); }
+  header {
+    padding: 14px 0 10px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+  }
+  header h1 { font-size: 15px; font-weight: 600; letter-spacing: 0.3px; color: var(--muted); text-transform: uppercase; margin-right: auto; }
+  #gpsdot {
+    width: 12px; height: 12px; border-radius: 50%;
+    background: var(--muted); transition: background 0.3s;
+    box-shadow: 0 0 8px transparent;
+  }
+  #gpsdot.good { background: var(--good); box-shadow: 0 0 10px var(--good); }
+  #gpsdot.warn { background: var(--warn); box-shadow: 0 0 10px var(--warn); }
+  #gpsdot.bad  { background: var(--bad);  box-shadow: 0 0 10px var(--bad); }
+
+  .readout {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+  }
+  #distance {
+    font-size: 22vw;
+    font-weight: 700;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -2px;
+  }
+  #unit { font-size: 6vw; color: var(--muted); font-weight: 500; margin-top: 6px; letter-spacing: 2px; }
+  #fare {
+    font-size: 12vw;
+    font-weight: 700;
+    color: var(--good);
+    margin-top: 24px;
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
+  }
+  #rateinfo {
+    font-size: 12px;
+    color: var(--muted);
+    margin-top: 10px;
+    letter-spacing: 0.3px;
+  }
+
+  .stats {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 10px;
+    margin: 18px 0;
+  }
+  .stat {
+    background: var(--panel);
+    border-radius: 12px;
+    padding: 12px 8px;
+    text-align: center;
+  }
+  .stat .label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
+  .stat .value { font-size: 20px; font-weight: 600; margin-top: 4px; font-variant-numeric: tabular-nums; }
+
+  .accuracy {
+    text-align: center;
+    font-size: 13px;
+    color: var(--muted);
+    margin-bottom: 14px;
+    min-height: 18px;
+  }
+
+  .controls { display: flex; gap: 12px; }
+  button {
+    flex: 1;
+    padding: 20px;
+    border: none;
+    border-radius: 14px;
+    font-size: 18px;
+    font-weight: 700;
+    color: #fff;
+    letter-spacing: 0.5px;
+    cursor: pointer;
+    transition: transform 0.1s, opacity 0.2s;
+  }
+  button:active { transform: scale(0.97); }
+  button:disabled { opacity: 0.35; }
+  #startBtn { background: var(--good); }
+  #startBtn.running { background: var(--warn); }
+  #resetBtn { background: var(--panel); color: var(--muted); flex: 0 0 30%; }
+
+  .calbar {
+    background: var(--panel);
+    border: 1px solid var(--accent);
+    border-radius: 10px;
+    padding: 10px 12px;
+    margin-bottom: 12px;
+    font-size: 13px;
+    display: none;
+  }
+  .calbar.on { display: block; }
+  .calbar .row { display: flex; justify-content: space-between; margin: 3px 0; }
+  .calbar .row span:last-child { font-variant-numeric: tabular-nums; font-weight: 600; }
+  #calError.high { color: var(--bad); }
+  #calError.ok { color: var(--good); }
+  #calToggle {
+    background: none;
+    border: 1px solid var(--muted);
+    color: var(--muted);
+    font-size: 12px;
+    padding: 6px 12px;
+    border-radius: 8px;
+    flex: 0 0 auto;
+    font-weight: 600;
+  }
+  #calToggle.on { border-color: var(--accent); color: var(--accent); }
+
+  .banner {
+    background: #1a1200;
+    border: 1px solid var(--warn);
+    color: var(--warn);
+    font-size: 12px;
+    padding: 8px 12px;
+    border-radius: 10px;
+    text-align: center;
+    margin-bottom: 12px;
+  }
+</style>
+</head>
+<body>
+  <header>
+    <h1>Trip Meter</h1>
+    <button id="calToggle">CAL</button>
+    <div id="gpsdot" title="GPS status"></div>
+  </header>
+
+  <div class="readout">
+    <div id="distance">0</div>
+    <div id="unit">METRES</div>
+    <div id="fare">$0.00</div>
+    <div id="rateinfo">$5.20 start + $1.50/km &nbsp;·&nbsp; 1.6 km = $7.60</div>
+  </div>
+
+  <div class="stats">
+    <div class="stat"><div class="label">Speed</div><div class="value" id="speed">—</div></div>
+    <div class="stat"><div class="label">Time</div><div class="value" id="time">0:00</div></div>
+    <div class="stat"><div class="label">Fixes</div><div class="value" id="fixes">0</div></div>
+  </div>
+
+  <div class="calbar" id="calbar">
+    <div class="row"><span>Target distance</span><span id="calTarget">1.600 km</span></div>
+    <div class="row"><span>Target fare</span><span>$7.60</span></div>
+    <div class="row"><span>GPS measured</span><span id="calMeasured">0.000 km</span></div>
+    <div class="row"><span>Error</span><span id="calError">—</span></div>
+  </div>
+
+  <div class="accuracy" id="accuracy">Press Start to begin tracking</div>
+
+  <div id="banner" class="banner" style="display:none"></div>
+
+  <div class="controls">
+    <button id="startBtn">START TRIP</button>
+    <button id="resetBtn">RESET</button>
+  </div>
+
+<script>
+// ---- Tunable drift-rejection thresholds -------------------------------
+const MAX_ACCURACY   = 15;   // metres; discard fixes worse than this
+const MIN_MOVE       = 1.0;  // metres; ignore deltas below this (stationary drift)
+const MAX_SPEED_MPS  = 55;   // ~198 km/h; reject implausible jumps
+// ---- Fare structure ---------------------------------------------------
+const DROP_FEE       = 5.20; // flat charge applied at Start
+const RATE_PER_KM    = 1.50; // $ per kilometre travelled
+const CAL_TARGET_KM  = 1.60; // known calibration distance
+// -----------------------------------------------------------------------
+
+let watchId = null;
+let running = false;
+let totalMetres = 0;
+let fixCount = 0;
+let last = null;          // last accepted fix {lat, lon, t}
+let startTime = null;
+let timerInt = null;
+let wakeLock = null;
+
+const $ = id => document.getElementById(id);
+
+function haversine(lat1, lon1, lat2, lon2) {
+  const R = 6371000;
+  const toRad = d => d * Math.PI / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat/2)**2 +
+            Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon/2)**2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
+
+function renderDistance() {
+  const km = totalMetres / 1000;
+  if (totalMetres < 1000) {
+    $('distance').textContent = Math.round(totalMetres);
+    $('unit').textContent = 'METRES';
+  } else {
+    $('distance').textContent = km.toFixed(3);
+    $('unit').textContent = 'KILOMETRES';
+  }
+  renderFare();
+}
+
+function renderFare() {
+  // No fare until the trip has started (drop fee applies on Start)
+  const fare = startTime ? DROP_FEE + (totalMetres / 1000) * RATE_PER_KM : 0;
+  $('fare').textContent = '$' + fare.toFixed(2);
+  renderCal();
+}
+
+let calMode = false;
+
+function renderCal() {
+  if (!calMode) return;
+  const km = totalMetres / 1000;
+  $('calMeasured').textContent = km.toFixed(3) + ' km';
+  const errM = totalMetres - CAL_TARGET_KM * 1000;   // signed metres
+  const errPct = CAL_TARGET_KM > 0 ? (errM / (CAL_TARGET_KM * 1000)) * 100 : 0;
+  const sign = errM >= 0 ? '+' : '';
+  const el = $('calError');
+  el.textContent = sign + errM.toFixed(0) + ' m (' + sign + errPct.toFixed(1) + '%)';
+  el.className = Math.abs(errPct) <= 3 ? 'ok' : 'high';
+}
+
+$('calTarget').textContent = CAL_TARGET_KM.toFixed(3) + ' km';
+$('calToggle').addEventListener('click', () => {
+  calMode = !calMode;
+  $('calToggle').classList.toggle('on', calMode);
+  $('calbar').classList.toggle('on', calMode);
+  if (calMode) renderCal();
+});
+
+function setGpsDot(acc) {
+  const dot = $('gpsdot');
+  dot.className = '';
+  if (acc == null) return;
+  if (acc <= MAX_ACCURACY) dot.classList.add('good');
+  else if (acc <= 30) dot.classList.add('warn');
+  else dot.classList.add('bad');
+}
+
+function fmtTime(s) {
+  const m = Math.floor(s / 60);
+  const sec = s % 60;
+  return m + ':' + String(sec).padStart(2, '0');
+}
+
+function onPosition(pos) {
+  const { latitude, longitude, accuracy, speed } = pos.coords;
+  const t = pos.timestamp;
+  setGpsDot(accuracy);
+  $('accuracy').textContent = 'Accuracy ±' + Math.round(accuracy) + ' m';
+
+  // Speed from device if available, else computed below
+  if (speed != null && !isNaN(speed)) {
+    $('speed').textContent = (speed * 3.6).toFixed(1) + ' km/h';
+  }
+
+  if (accuracy > MAX_ACCURACY) return;   // gate 1: bad fix
+
+  fixCount++;
+  $('fixes').textContent = fixCount;
+
+  if (last) {
+    const d = haversine(last.lat, last.lon, latitude, longitude);
+    const dt = (t - last.t) / 1000;
+    const impliedSpeed = dt > 0 ? d / dt : 0;
+
+    if (d >= MIN_MOVE && impliedSpeed <= MAX_SPEED_MPS) {  // gates 2 & 3
+      totalMetres += d;
+      renderDistance();
+      if (speed == null || isNaN(speed)) {
+        $('speed').textContent = (impliedSpeed * 3.6).toFixed(1) + ' km/h';
+      }
+    }
+  }
+  last = { lat: latitude, lon: longitude, t };
+}
+
+function onError(err) {
+  $('gpsdot').className = 'bad';
+  $('accuracy').textContent = 'GPS error: ' + err.message;
+}
+
+async function requestWakeLock() {
+  try {
+    if ('wakeLock' in navigator) {
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', () => {});
+    }
+  } catch (e) { /* wake lock denied; screen may sleep */ }
+}
+
+function releaseWakeLock() {
+  if (wakeLock) { wakeLock.release(); wakeLock = null; }
+}
+
+// Re-acquire wake lock if the page becomes visible again
+document.addEventListener('visibilitychange', () => {
+  if (running && document.visibilityState === 'visible') requestWakeLock();
+});
+
+function start() {
+  if (!('geolocation' in navigator)) {
+    showBanner('Geolocation not supported on this device.');
+    return;
+  }
+  running = true;
+  last = null;
+  startTime = Date.now();
+  $('startBtn').textContent = 'PAUSE';
+  $('startBtn').classList.add('running');
+  $('accuracy').textContent = 'Acquiring GPS…';
+  renderFare();   // show drop fee at once
+
+  requestWakeLock();
+
+  watchId = navigator.geolocation.watchPosition(onPosition, onError, {
+    enableHighAccuracy: true,
+    maximumAge: 0,
+    timeout: 10000
+  });
+
+  timerInt = setInterval(() => {
+    const s = Math.floor((Date.now() - startTime) / 1000);
+    $('time').textContent = fmtTime(s);
+  }, 1000);
+}
+
+function pause() {
+  running = false;
+  $('startBtn').textContent = 'RESUME';
+  $('startBtn').classList.remove('running');
+  if (watchId != null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
+  if (timerInt) { clearInterval(timerInt); timerInt = null; }
+  last = null;   // avoid phantom jump across a pause gap
+  releaseWakeLock();
+  $('gpsdot').className = '';
+}
+
+function reset() {
+  pause();
+  totalMetres = 0;
+  fixCount = 0;
+  startTime = null;
+  $('startBtn').textContent = 'START TRIP';
+  $('time').textContent = '0:00';
+  $('fixes').textContent = '0';
+  $('speed').textContent = '—';
+  $('accuracy').textContent = 'Press Start to begin tracking';
+  renderDistance();
+}
+
+function showBanner(msg) {
+  const b = $('banner');
+  b.textContent = msg;
+  b.style.display = 'block';
+}
+
+$('startBtn').addEventListener('click', () => running ? pause() : start());
+$('resetBtn').addEventListener('click', reset);
+
+// Register service worker for offline use
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('sw.js').catch(() => {});
+}
+
+renderDistance();
+</script>
+</body>
+</html>

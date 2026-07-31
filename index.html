@@ -290,6 +290,36 @@ function haversine(lat1, lon1, lat2, lon2) {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
 }
 
+// Simple 1D Kalman filter over lat/lon, run in a local metres-offset space so
+// latitude and longitude blend by the same gain despite unequal degree-to-metre scale.
+// Process noise grows with a speed estimate so the filter smooths jitter at a stop
+// without lagging behind genuine motion.
+const DEFAULT_SPEED_ESTIMATE = 6; // m/s; assumed variability when device reports no speed
+const gpsFilter = {
+  lat: null, lon: null, variance: null, t: null,
+  reset() { this.lat = this.lon = this.variance = this.t = null; },
+  update(lat, lon, accuracy, t, speedEstimate) {
+    if (this.lat == null) {
+      this.lat = lat; this.lon = lon; this.variance = accuracy * accuracy; this.t = t;
+      return { lat, lon };
+    }
+    const dt = Math.max(0, (t - this.t) / 1000);
+    this.variance += dt * speedEstimate * speedEstimate;
+    this.t = t;
+
+    const K = this.variance / (this.variance + accuracy * accuracy);
+    const mPerDegLat = 111320;
+    const mPerDegLon = 111320 * Math.cos(lat * Math.PI / 180);
+    const dLatM = (lat - this.lat) * mPerDegLat;
+    const dLonM = (lon - this.lon) * mPerDegLon;
+    this.lat += (K * dLatM) / mPerDegLat;
+    this.lon += (K * dLonM) / (mPerDegLon || 1);
+    this.variance *= (1 - K);
+
+    return { lat: this.lat, lon: this.lon };
+  }
+};
+
 function renderDistance() {
   const km = totalMetres / 1000;
   if (totalMetres < 1000) {
@@ -365,17 +395,25 @@ function onPosition(pos) {
   fixCount++;
   $('fixes').textContent = fixCount;
 
+  // Device-reported speed (Doppler-derived) is an independent measurement, safe to
+  // use for process noise. Deriving it from raw fix-to-fix distance instead would
+  // feed GPS jitter back into itself (noisy fix -> inflated speed -> less smoothing
+  // -> more jitter passes through), so when the device doesn't report speed we fall
+  // back to a fixed assumption rather than an implied one.
+  const speedEstimate = (speed != null && !isNaN(speed)) ? speed : DEFAULT_SPEED_ESTIMATE;
+  const filtered = gpsFilter.update(latitude, longitude, accuracy, t, speedEstimate);
+
   // --- ACQUIRE PHASE: warm up, do not accumulate distance ---
   if (phase === 'acquiring') {
     acqFixes++;
-    last = { lat: latitude, lon: longitude, t };  // keep a fresh anchor
+    last = { lat: filtered.lat, lon: filtered.lon, t };  // keep a fresh anchor
     updateAcquireUI();
     return;
   }
 
   // --- TRIP PHASE: accumulate distance ---
   if (last) {
-    const d = haversine(last.lat, last.lon, latitude, longitude);
+    const d = haversine(last.lat, last.lon, filtered.lat, filtered.lon);
     const dt = (t - last.t) / 1000;
     const impliedSpeed = dt > 0 ? d / dt : 0;
 
@@ -387,7 +425,7 @@ function onPosition(pos) {
       }
     }
   }
-  last = { lat: latitude, lon: longitude, t };
+  last = { lat: filtered.lat, lon: filtered.lon, t };
   $('accuracy').textContent = 'Accuracy ±' + Math.round(accuracy) + ' m';
 }
 
@@ -443,6 +481,7 @@ function acquire() {
   acqFixes = 0;
   last = null;
   lastAccuracy = null;
+  gpsFilter.reset();
   $('startBtn').classList.remove('running', 'ready');
   $('startBtn').disabled = true;
   $('startBtn').textContent = 'ACQUIRING…';
@@ -452,7 +491,7 @@ function acquire() {
   watchId = navigator.geolocation.watchPosition(onPosition, onError, {
     enableHighAccuracy: true,
     maximumAge: 0,
-    timeout: 10000
+    timeout: 20000
   });
 }
 
@@ -462,6 +501,7 @@ function zeroAndStart() {
   totalMetres = 0;
   fixCount = 0;
   last = null;            // next fix becomes the true origin
+  gpsFilter.reset();
   startTime = Date.now();
   $('accuracy').style.color = '';
   $('startBtn').textContent = 'PAUSE';
@@ -484,6 +524,7 @@ function pause() {
   if (watchId != null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
   if (timerInt) { clearInterval(timerInt); timerInt = null; }
   last = null;   // avoid phantom jump across a pause gap
+  gpsFilter.reset();
   releaseWakeLock();
   $('gpsdot').className = '';
   $('accuracy').textContent = 'Paused · Resume re-acquires GPS';
@@ -504,17 +545,15 @@ function reset() {
   acqFixes = 0;
   last = null;
   lastAccuracy = null;
+  gpsFilter.reset();
   startTime = null;
-  $('startBtn').disabled = false;
-  $('startBtn').textContent = 'ACQUIRE GPS';
-  $('startBtn').classList.remove('running', 'ready');
   $('time').textContent = '0:00';
   $('fixes').textContent = '0';
   $('speed').textContent = '—';
   $('accuracy').style.color = '';
-  $('accuracy').textContent = 'Press Acquire to warm up GPS';
   $('gpsdot').className = '';
   renderDistance();
+  acquire();   // immediately start warming up for the next fare
 }
 
 function showBanner(msg) {
@@ -545,6 +584,7 @@ if ('serviceWorker' in navigator) {
 }
 
 renderDistance();
+acquire();   // start warming up GPS immediately on load, before any tap
 </script>
 </body>
 </html>

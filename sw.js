@@ -1,4 +1,4 @@
-const CACHE = 'tripmeter-v1';
+const CACHE = 'tripmeter-v2';
 const ASSETS = [
   './',
   './index.html',
